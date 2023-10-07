@@ -24,15 +24,15 @@ from lit_gpt import FusedCrossEntropyLoss
 import random
 
 model_name = "tiny_LLaMA_1b"
-name = "tinyllama_1b"
+name = "tinyllama_1b_mixed"
 out_dir = Path("out") / name
 
 # Hyperparameters
-num_of_devices = 8
-global_batch_size = 512
+num_of_devices = 16 # 4 nodes
+global_batch_size = 1024 # Token per step = 2M
 learning_rate = 4e-4
 micro_batch_size = 8
-max_step = 715256 * 2
+max_step = (715256 * 2) // 10 # 300B tokens
 warmup_steps = 2000
 log_step_interval = 10
 eval_iters = 100
@@ -62,12 +62,15 @@ log_iter_interval = log_step_interval * gradient_accumulation_steps
 
 # Treat all dataset equally by their size. If you want to use a different weight for a dataset, add it to the list with the weight.
 train_data_config = [
-    ("train_slim", 0.693584),
-    ("train_star", 0.306416),
+    # ("train_slim", 0.693584),
+    # ("train_star", 0.306416),
+    ("train_openthaigpt", 1.0),
+    ("train_thepile", 1.0),
 ]
 
 val_data_config = [
-    ("validation", 1.0),
+    ("eval_openthaigpt", 1.0),
+    ("eval_thepile", 1.0),
 ]
 
 hparams = {k: v for k, v in locals().items() if isinstance(v, (int, float, str)) and not k.startswith("_")}
@@ -76,7 +79,8 @@ wandb_logger = WandbLogger()
 
 
 def setup(
-    devices: int = 8,
+    devices: int = 4,
+    num_nodes: int = 4,
     train_data_dir: Path = Path("data/redpajama_sample"),
     val_data_dir: Optional[Path] = None,
     precision: Optional[str] = None,
@@ -101,8 +105,9 @@ def setup(
     else:
         strategy = "auto"
 
-    fabric = L.Fabric(devices=devices, strategy=strategy, precision=precision, loggers=[logger, wandb_logger])
+    fabric = L.Fabric(accelerator='gpu', devices=devices, num_nodes=num_nodes, strategy=strategy, precision=precision, loggers=[logger, wandb_logger])
     fabric.print(hparams)
+    fabric.launch()
     #fabric.launch(main, train_data_dir, val_data_dir, resume)
     main(fabric, train_data_dir, val_data_dir, resume)
 
@@ -242,6 +247,7 @@ def train(fabric, state, train_dataloader, val_dataloader, monitor, resume):
                 f" remaining time: {(t1 - total_t0) / (state['iter_num'] - initial_iter) * (max_iters - state['iter_num']) / 3600:.2f} hours. " 
                 # print days as well
                 f" or {(t1 - total_t0) / (state['iter_num'] - initial_iter) * (max_iters - state['iter_num']) / 3600 / 24:.2f} days. "
+                # f"learning rate: {lr:.6f}"
             )
  
         monitor.on_train_batch_end(
@@ -312,7 +318,7 @@ def create_dataloader(
             # n_chunks control the buffer size. 
             # Note that the buffer size also impacts the random shuffle
             # (PackedDataset is an IterableDataset. So the shuffle is done by prefetch a buffer and shuffle the buffer)
-            n_chunks=8,
+            n_chunks=8 if split == "train" else 1,
             block_size=block_size,
             shuffle=shuffle,
             seed=seed,
